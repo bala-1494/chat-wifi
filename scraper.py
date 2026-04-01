@@ -83,7 +83,7 @@ def fetch_tcin(session: requests.Session, tcin: str) -> dict:
         "tcin":             tcin,
         "visitor_id":       VISITOR_ID,
         "channel":          "WEB",
-        "page":             f"/p/A-{tcin}",
+        "page":             f"/p/-/A-{tcin}",
         "pricing_store_id": STORE_ID,
     }
     headers = {**HEADERS, "Referer": f"https://www.target.com/p/-/A-{tcin}"}
