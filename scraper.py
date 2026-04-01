@@ -223,6 +223,7 @@ def run_scraper(
     tcins: list[str],
     progress_cb=None,
     output_path: str | None = None,
+    pause_event=None,
 ) -> list[dict]:
     """
     Scrape a list of TCINs and return rows.
@@ -231,6 +232,10 @@ def run_scraper(
     If output_path is given, each row is written to that CSV file immediately
     after it is fetched so partial results survive an app restart or crash.
     The file is created fresh at the start of each run (overwrite).
+
+    If pause_event (a threading.Event) is provided, the loop checks it before
+    each TCIN and exits cleanly when set, allowing the caller to pause scraping
+    mid-run without killing the thread.
 
     On HTTP 403 the scraper refreshes its session and retries up to MAX_RETRIES
     times, waiting RETRY_BACKOFF[attempt] seconds between each try.  All other
@@ -251,6 +256,10 @@ def run_scraper(
     session = _new_session()
     try:
         for i, tcin in enumerate(tcins, 1):
+            # Honour a pause request between TCINs (never mid-fetch).
+            if pause_event is not None and pause_event.is_set():
+                break
+
             rows = None
             last_error = None
 
