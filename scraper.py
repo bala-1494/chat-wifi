@@ -2,16 +2,21 @@
 Target.com price scraper core logic.
 """
 
+import random
 import time
 from datetime import datetime, timezone
 
 import requests
 
-API_BASE   = "https://redsky.target.com/redsky_aggregations/v1/web/pdp_client_v1"
-API_KEY    = "9f36aeafbe60771e321a7cc95a78140772ab3e96"
-STORE_ID   = "3991"
-VISITOR_ID = "018F2D7E4CA102019ACED07796CE1060"
-DELAY_SEC  = 0.8
+API_BASE        = "https://redsky.target.com/redsky_aggregations/v1/web/pdp_client_v1"
+API_KEY         = "9f36aeafbe60771e321a7cc95a78140772ab3e96"
+STORE_ID        = "3991"
+VISITOR_ID      = "018F2D7E4CA102019ACED07796CE1060"
+DELAY_SEC       = 1.2   # base inter-request delay (seconds)
+JITTER_SEC      = 0.6   # random jitter added to each delay
+MAX_RETRIES     = 3     # max retries per TCIN on 403
+# how long to wait before each retry attempt after a 403
+RETRY_BACKOFF   = [30, 60, 120]
 
 CSV_FIELDS = [
     "tcin",
@@ -165,31 +170,63 @@ def parse_product(tcin: str, data: dict) -> list[dict]:
     }]
 
 
+def _new_session() -> requests.Session:
+    return requests.Session()
+
+
 def run_scraper(tcins: list[str], progress_cb=None) -> list[dict]:
     """
     Scrape a list of TCINs and return rows.
-    progress_cb(i, total, tcin, rows_or_error) is called after each fetch.
+    progress_cb(i, total, tcin, rows, error) is called after each TCIN is settled.
+
+    On HTTP 403 the scraper refreshes its session and retries up to MAX_RETRIES
+    times, waiting RETRY_BACKOFF[attempt] seconds between each try.  All other
+    requests use DELAY_SEC + random jitter to avoid predictable cadence.
     """
     all_rows = []
-    with requests.Session() as session:
+    total = len(tcins)
+    session = _new_session()
+    try:
         for i, tcin in enumerate(tcins, 1):
-            try:
-                data = fetch_tcin(session, tcin)
-                rows = parse_product(tcin, data)
+            rows = None
+            last_error = None
+
+            for attempt in range(MAX_RETRIES + 1):
+                try:
+                    data = fetch_tcin(session, tcin)
+                    rows = parse_product(tcin, data)
+                    break  # success — exit retry loop
+                except requests.HTTPError as e:
+                    status = e.response.status_code
+                    if status == 403 and attempt < MAX_RETRIES:
+                        wait = RETRY_BACKOFF[attempt]
+                        if progress_cb:
+                            progress_cb(
+                                i, total, tcin, None,
+                                f"HTTP 403 — waiting {wait}s before retry {attempt + 1}/{MAX_RETRIES}",
+                            )
+                        session.close()
+                        session = _new_session()
+                        time.sleep(wait)
+                        continue
+                    last_error = f"HTTP {status}"
+                    break
+                except Exception as e:
+                    last_error = str(e)
+                    break
+
+            if rows is not None:
                 all_rows.extend(rows)
                 if progress_cb:
-                    progress_cb(i, len(tcins), tcin, rows, None)
-            except requests.HTTPError as e:
-                msg = f"HTTP {e.response.status_code}"
-                all_rows.append(error_row(tcin, msg))
+                    progress_cb(i, total, tcin, rows, None)
+            else:
+                all_rows.append(error_row(tcin, last_error))
                 if progress_cb:
-                    progress_cb(i, len(tcins), tcin, None, msg)
-            except Exception as e:
-                all_rows.append(error_row(tcin, str(e)))
-                if progress_cb:
-                    progress_cb(i, len(tcins), tcin, None, str(e))
+                    progress_cb(i, total, tcin, None, last_error)
 
-            if i < len(tcins):
-                time.sleep(DELAY_SEC)
+            if i < total:
+                time.sleep(DELAY_SEC + random.uniform(0, JITTER_SEC))
+    finally:
+        session.close()
 
     return all_rows
