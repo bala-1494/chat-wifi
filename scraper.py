@@ -2,6 +2,8 @@
 Target.com price scraper core logic.
 """
 
+import csv
+import os
 import random
 import time
 from datetime import datetime, timezone
@@ -217,10 +219,18 @@ def _new_session() -> requests.Session:
     return requests.Session()
 
 
-def run_scraper(tcins: list[str], progress_cb=None) -> list[dict]:
+def run_scraper(
+    tcins: list[str],
+    progress_cb=None,
+    output_path: str | None = None,
+) -> list[dict]:
     """
     Scrape a list of TCINs and return rows.
     progress_cb(i, total, tcin, rows, error) is called after each TCIN is settled.
+
+    If output_path is given, each row is written to that CSV file immediately
+    after it is fetched so partial results survive an app restart or crash.
+    The file is created fresh at the start of each run (overwrite).
 
     On HTTP 403 the scraper refreshes its session and retries up to MAX_RETRIES
     times, waiting RETRY_BACKOFF[attempt] seconds between each try.  All other
@@ -228,6 +238,16 @@ def run_scraper(tcins: list[str], progress_cb=None) -> list[dict]:
     """
     all_rows = []
     total = len(tcins)
+
+    # Open the incremental output file once and keep it open for the whole run.
+    out_fh = None
+    out_writer = None
+    if output_path:
+        out_fh = open(output_path, "w", newline="", encoding="utf-8")
+        out_writer = csv.DictWriter(out_fh, fieldnames=CSV_FIELDS)
+        out_writer.writeheader()
+        out_fh.flush()
+
     session = _new_session()
     try:
         for i, tcin in enumerate(tcins, 1):
@@ -258,18 +278,26 @@ def run_scraper(tcins: list[str], progress_cb=None) -> list[dict]:
                     last_error = str(e)
                     break
 
-            if rows is not None:
-                all_rows.extend(rows)
-                if progress_cb:
+            settled = rows if rows is not None else [error_row(tcin, last_error)]
+            all_rows.extend(settled)
+
+            # Flush to disk immediately so data survives a crash / sleep.
+            if out_writer:
+                out_writer.writerows(settled)
+                out_fh.flush()
+                os.fsync(out_fh.fileno())
+
+            if progress_cb:
+                if rows is not None:
                     progress_cb(i, total, tcin, rows, None)
-            else:
-                all_rows.append(error_row(tcin, last_error))
-                if progress_cb:
+                else:
                     progress_cb(i, total, tcin, None, last_error)
 
             if i < total:
                 time.sleep(_human_delay(i))
     finally:
         session.close()
+        if out_fh:
+            out_fh.close()
 
     return all_rows

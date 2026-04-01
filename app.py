@@ -1,5 +1,6 @@
-import io
 import csv
+import io
+import os
 
 import streamlit as st
 
@@ -9,6 +10,38 @@ st.set_page_config(page_title="Scrapper — Target Price Scraper", page_icon="�
 
 st.title("🔍 Scrapper")
 st.caption("Fetch live pricing data from Target.com by TCIN")
+
+# Temp file written incrementally during a run so partial data survives
+# an app restart / Streamlit free-tier sleep.
+PARTIAL_FILE = "/tmp/target_scrape_partial.csv"
+
+# ── Previous-session recovery ─────────────────────────────────────────────────
+
+if os.path.exists(PARTIAL_FILE):
+    with open(PARTIAL_FILE, newline="", encoding="utf-8") as fh:
+        saved_rows = list(csv.DictReader(fh))
+    if saved_rows:
+        with st.expander(
+            f"♻️  Previous session data available — {len(saved_rows)} row(s) saved",
+            expanded=True,
+        ):
+            st.caption(
+                "The app was interrupted mid-scrape last time.  "
+                "Download what was captured, then start a new run."
+            )
+            buf = io.StringIO()
+            writer = csv.DictWriter(buf, fieldnames=CSV_FIELDS, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(saved_rows)
+            st.download_button(
+                label="⬇  Download partial results",
+                data=buf.getvalue().encode("utf-8"),
+                file_name="target_prices_partial.csv",
+                mime="text/csv",
+            )
+            if st.button("🗑  Discard saved data"):
+                os.remove(PARTIAL_FILE)
+                st.rerun()
 
 st.divider()
 
@@ -58,23 +91,48 @@ st.divider()
 run_btn = st.button("▶  Run Scraper", type="primary", disabled=not tcins)
 
 if run_btn and tcins:
-    progress_bar = st.progress(0, text="Starting…")
-    log_area     = st.empty()
+    progress_bar  = st.progress(0, text="Starting…")
+    log_area      = st.empty()
+    download_slot = st.empty()   # live download button updated as rows arrive
     log_lines: list[str] = []
 
+    # Accumulate rows here so we can offer a live download at any point.
+    live_results: list[dict] = []
+
+    def _csv_bytes(rows: list[dict]) -> bytes:
+        buf = io.StringIO()
+        w = csv.DictWriter(buf, fieldnames=CSV_FIELDS, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(rows)
+        return buf.getvalue().encode("utf-8")
+
     def progress_cb(i, total, tcin, rows, error):
+        nonlocal live_results
         pct = i / total
         progress_bar.progress(pct, text=f"[{i}/{total}] TCIN {tcin}")
         if error:
             log_lines.append(f"✗ {tcin} — {error}")
         else:
             log_lines.append(f"✓ {tcin} — {len(rows)} row(s)")
-        log_area.code("\n".join(log_lines[-20:]))  # show last 20 lines
+        log_area.code("\n".join(log_lines[-20:]))
+
+        # Update live_results and refresh the download button.
+        if rows:
+            live_results.extend(rows)
+        if live_results:
+            download_slot.download_button(
+                label=f"⬇  Download {len(live_results)} row(s) so far",
+                data=_csv_bytes(live_results),
+                file_name="target_prices_partial.csv",
+                mime="text/csv",
+                key=f"live_dl_{i}",   # unique key so Streamlit re-renders it
+            )
 
     with st.spinner("Scraping…"):
-        results = run_scraper(tcins, progress_cb=progress_cb)
+        results = run_scraper(tcins, progress_cb=progress_cb, output_path=PARTIAL_FILE)
 
     progress_bar.progress(1.0, text="Done")
+    download_slot.empty()   # replace live button with the final one below
 
     st.success(f"Scraped **{len(results)} row(s)** from {len(tcins)} TCIN(s).")
 
@@ -104,16 +162,15 @@ if run_btn and tcins:
     with tab_err:
         show_table(err_rows)
 
-    # ── Download ─────────────────────────────────────────────────────────────
-
-    buf = io.StringIO()
-    writer = csv.DictWriter(buf, fieldnames=CSV_FIELDS)
-    writer.writeheader()
-    writer.writerows(results)
+    # ── Final download ────────────────────────────────────────────────────────
 
     st.download_button(
         label="⬇  Download CSV",
-        data=buf.getvalue().encode("utf-8"),
+        data=_csv_bytes(results),
         file_name="target_prices.csv",
         mime="text/csv",
     )
+
+    # Clean up temp file now that the user has the full results.
+    if os.path.exists(PARTIAL_FILE):
+        os.remove(PARTIAL_FILE)
