@@ -12,11 +12,25 @@ API_BASE        = "https://redsky.target.com/redsky_aggregations/v1/web/pdp_clie
 API_KEY         = "9f36aeafbe60771e321a7cc95a78140772ab3e96"
 STORE_ID        = "3991"
 VISITOR_ID      = "018F2D7E4CA102019ACED07796CE1060"
-DELAY_SEC       = 1.2   # base inter-request delay (seconds)
-JITTER_SEC      = 0.6   # random jitter added to each delay
 MAX_RETRIES     = 3     # max retries per TCIN on 403
 # how long to wait before each retry attempt after a 403
 RETRY_BACKOFF   = [30, 60, 120]
+
+# Human-like delay tiers: (weight, min_sec, max_sec)
+#   70 % → quick glance   1 – 3 s
+#   20 % → reading        3 – 7 s
+#   10 % → distracted     8 – 15 s
+_DELAY_TIERS = [
+    (0.70, 1.0,  3.0),
+    (0.20, 3.0,  7.0),
+    (0.10, 8.0, 15.0),
+]
+
+# Every BREAK_EVERY ± BREAK_JITTER requests, pause for BREAK_RANGE seconds
+# to simulate a human stepping away briefly.
+BREAK_EVERY  = 75
+BREAK_JITTER = 25
+BREAK_RANGE  = (20.0, 45.0)
 
 CSV_FIELDS = [
     "tcin",
@@ -170,6 +184,35 @@ def parse_product(tcin: str, data: dict) -> list[dict]:
     }]
 
 
+def _human_delay(request_index: int) -> float:
+    """
+    Return a randomised wait time that mimics human browsing cadence.
+
+    Most pauses are short (quick click), some are medium (reading),
+    a few are long (distracted).  Every ~75 requests an extra 'break'
+    is injected so the session never looks like a metronomic bot.
+
+    request_index is 1-based (the number of requests completed so far).
+    """
+    # Weighted tier selection
+    roll = random.random()
+    cumulative = 0.0
+    lo, hi = 1.0, 3.0   # fallback to quick tier
+    for weight, tier_lo, tier_hi in _DELAY_TIERS:
+        cumulative += weight
+        if roll < cumulative:
+            lo, hi = tier_lo, tier_hi
+            break
+    delay = random.uniform(lo, hi)
+
+    # Occasional longer break every BREAK_EVERY ± BREAK_JITTER requests
+    next_break = BREAK_EVERY + random.randint(-BREAK_JITTER, BREAK_JITTER)
+    if request_index % next_break == 0:
+        delay += random.uniform(*BREAK_RANGE)
+
+    return delay
+
+
 def _new_session() -> requests.Session:
     return requests.Session()
 
@@ -181,7 +224,7 @@ def run_scraper(tcins: list[str], progress_cb=None) -> list[dict]:
 
     On HTTP 403 the scraper refreshes its session and retries up to MAX_RETRIES
     times, waiting RETRY_BACKOFF[attempt] seconds between each try.  All other
-    requests use DELAY_SEC + random jitter to avoid predictable cadence.
+    requests use human-like randomised delays to avoid predictable cadence.
     """
     all_rows = []
     total = len(tcins)
@@ -225,7 +268,7 @@ def run_scraper(tcins: list[str], progress_cb=None) -> list[dict]:
                     progress_cb(i, total, tcin, None, last_error)
 
             if i < total:
-                time.sleep(DELAY_SEC + random.uniform(0, JITTER_SEC))
+                time.sleep(_human_delay(i))
     finally:
         session.close()
 
