@@ -2,16 +2,37 @@
 Target.com price scraper core logic.
 """
 
+import csv
+import os
+import random
 import time
 from datetime import datetime, timezone
 
 import requests
 
-API_BASE   = "https://redsky.target.com/redsky_aggregations/v1/web/pdp_client_v1"
-API_KEY    = "9f36aeafbe60771e321a7cc95a78140772ab3e96"
-STORE_ID   = "3991"
-VISITOR_ID = "018F2D7E4CA102019ACED07796CE1060"
-DELAY_SEC  = 0.8
+API_BASE        = "https://redsky.target.com/redsky_aggregations/v1/web/pdp_client_v1"
+API_KEY         = "9f36aeafbe60771e321a7cc95a78140772ab3e96"
+STORE_ID        = "3991"
+VISITOR_ID      = "018F2D7E4CA102019ACED07796CE1060"
+MAX_RETRIES     = 3     # max retries per TCIN on 403
+# how long to wait before each retry attempt after a 403
+RETRY_BACKOFF   = [30, 60, 120]
+
+# Human-like delay tiers: (weight, min_sec, max_sec)
+#   70 % → quick glance   1 – 3 s
+#   20 % → reading        3 – 7 s
+#   10 % → distracted     8 – 15 s
+_DELAY_TIERS = [
+    (0.70, 1.0,  3.0),
+    (0.20, 3.0,  7.0),
+    (0.10, 8.0, 15.0),
+]
+
+# Every BREAK_EVERY ± BREAK_JITTER requests, pause for BREAK_RANGE seconds
+# to simulate a human stepping away briefly.
+BREAK_EVERY  = 75
+BREAK_JITTER = 25
+BREAK_RANGE  = (20.0, 45.0)
 
 CSV_FIELDS = [
     "tcin",
@@ -165,31 +186,127 @@ def parse_product(tcin: str, data: dict) -> list[dict]:
     }]
 
 
-def run_scraper(tcins: list[str], progress_cb=None) -> list[dict]:
+def _human_delay(request_index: int) -> float:
+    """
+    Return a randomised wait time that mimics human browsing cadence.
+
+    Most pauses are short (quick click), some are medium (reading),
+    a few are long (distracted).  Every ~75 requests an extra 'break'
+    is injected so the session never looks like a metronomic bot.
+
+    request_index is 1-based (the number of requests completed so far).
+    """
+    # Weighted tier selection
+    roll = random.random()
+    cumulative = 0.0
+    lo, hi = 1.0, 3.0   # fallback to quick tier
+    for weight, tier_lo, tier_hi in _DELAY_TIERS:
+        cumulative += weight
+        if roll < cumulative:
+            lo, hi = tier_lo, tier_hi
+            break
+    delay = random.uniform(lo, hi)
+
+    # Occasional longer break every BREAK_EVERY ± BREAK_JITTER requests
+    next_break = BREAK_EVERY + random.randint(-BREAK_JITTER, BREAK_JITTER)
+    if request_index % next_break == 0:
+        delay += random.uniform(*BREAK_RANGE)
+
+    return delay
+
+
+def _new_session() -> requests.Session:
+    return requests.Session()
+
+
+def run_scraper(
+    tcins: list[str],
+    progress_cb=None,
+    output_path: str | None = None,
+    pause_event=None,
+) -> list[dict]:
     """
     Scrape a list of TCINs and return rows.
-    progress_cb(i, total, tcin, rows_or_error) is called after each fetch.
+    progress_cb(i, total, tcin, rows, error) is called after each TCIN is settled.
+
+    If output_path is given, each row is written to that CSV file immediately
+    after it is fetched so partial results survive an app restart or crash.
+    The file is created fresh at the start of each run (overwrite).
+
+    If pause_event (a threading.Event) is provided, the loop checks it before
+    each TCIN and exits cleanly when set, allowing the caller to pause scraping
+    mid-run without killing the thread.
+
+    On HTTP 403 the scraper refreshes its session and retries up to MAX_RETRIES
+    times, waiting RETRY_BACKOFF[attempt] seconds between each try.  All other
+    requests use human-like randomised delays to avoid predictable cadence.
     """
     all_rows = []
-    with requests.Session() as session:
-        for i, tcin in enumerate(tcins, 1):
-            try:
-                data = fetch_tcin(session, tcin)
-                rows = parse_product(tcin, data)
-                all_rows.extend(rows)
-                if progress_cb:
-                    progress_cb(i, len(tcins), tcin, rows, None)
-            except requests.HTTPError as e:
-                msg = f"HTTP {e.response.status_code}"
-                all_rows.append(error_row(tcin, msg))
-                if progress_cb:
-                    progress_cb(i, len(tcins), tcin, None, msg)
-            except Exception as e:
-                all_rows.append(error_row(tcin, str(e)))
-                if progress_cb:
-                    progress_cb(i, len(tcins), tcin, None, str(e))
+    total = len(tcins)
 
-            if i < len(tcins):
-                time.sleep(DELAY_SEC)
+    # Open the incremental output file once and keep it open for the whole run.
+    out_fh = None
+    out_writer = None
+    if output_path:
+        out_fh = open(output_path, "w", newline="", encoding="utf-8")
+        out_writer = csv.DictWriter(out_fh, fieldnames=CSV_FIELDS)
+        out_writer.writeheader()
+        out_fh.flush()
+
+    session = _new_session()
+    try:
+        for i, tcin in enumerate(tcins, 1):
+            # Honour a pause request between TCINs (never mid-fetch).
+            if pause_event is not None and pause_event.is_set():
+                break
+
+            rows = None
+            last_error = None
+
+            for attempt in range(MAX_RETRIES + 1):
+                try:
+                    data = fetch_tcin(session, tcin)
+                    rows = parse_product(tcin, data)
+                    break  # success — exit retry loop
+                except requests.HTTPError as e:
+                    status = e.response.status_code
+                    if status == 403 and attempt < MAX_RETRIES:
+                        wait = RETRY_BACKOFF[attempt]
+                        if progress_cb:
+                            progress_cb(
+                                i, total, tcin, None,
+                                f"HTTP 403 — waiting {wait}s before retry {attempt + 1}/{MAX_RETRIES}",
+                            )
+                        session.close()
+                        session = _new_session()
+                        time.sleep(wait)
+                        continue
+                    last_error = f"HTTP {status}"
+                    break
+                except Exception as e:
+                    last_error = str(e)
+                    break
+
+            settled = rows if rows is not None else [error_row(tcin, last_error)]
+            all_rows.extend(settled)
+
+            # Flush to disk immediately so data survives a crash / sleep.
+            if out_writer:
+                out_writer.writerows(settled)
+                out_fh.flush()
+                os.fsync(out_fh.fileno())
+
+            if progress_cb:
+                if rows is not None:
+                    progress_cb(i, total, tcin, rows, None)
+                else:
+                    progress_cb(i, total, tcin, None, last_error)
+
+            if i < total:
+                time.sleep(_human_delay(i))
+    finally:
+        session.close()
+        if out_fh:
+            out_fh.close()
 
     return all_rows
