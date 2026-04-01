@@ -79,12 +79,19 @@ def error_row(tcin: str, message: str) -> dict:
 
 def fetch_tcin(session: requests.Session, tcin: str) -> dict:
     params = {
-        "key":              API_KEY,
-        "tcin":             tcin,
-        "visitor_id":       VISITOR_ID,
-        "channel":          "WEB",
-        "page":             f"/p/A-{tcin}",
-        "pricing_store_id": STORE_ID,
+        "key":                    API_KEY,
+        "tcin":                   tcin,
+        "is_bot":                 "false",
+        "store_id":               STORE_ID,
+        "pricing_store_id":       STORE_ID,
+        "has_pricing_store_id":   "true",
+        "has_financing_options":  "true",
+        "include_obsolete":       "false",
+        "visitor_id":             VISITOR_ID,
+        "skip_personalized":      "true",
+        "skip_variation_hierarchy": "true",
+        "channel":                "WEB",
+        "page":                   f"/p/A-{tcin}",
     }
     headers = {**HEADERS, "Referer": f"https://www.target.com/p/-/A-{tcin}"}
     resp = session.get(API_BASE, params=params, headers=headers, timeout=15)
