@@ -1,3 +1,25 @@
+// Short links (e.g. shared from the Google Maps app) redirect to the
+// canonical google.com/maps URL. They carry no place info themselves,
+// so they must be resolved server-side before parsing.
+function isShortUrl(url: string): boolean {
+  try {
+    const { hostname, pathname } = new URL(url)
+    return hostname === 'maps.app.goo.gl' || (hostname === 'goo.gl' && pathname.startsWith('/maps'))
+  } catch {
+    return false
+  }
+}
+
+export async function expandShortUrl(url: string): Promise<string> {
+  if (!isShortUrl(url)) return url
+  try {
+    const res = await fetch(url, { redirect: 'follow' })
+    return res.url || url
+  } catch {
+    return url
+  }
+}
+
 export function parseMapsUrl(url: string): { placeId?: string; query?: string } {
   // Extract ChIJ... place ID from data parameter
   const placeIdMatch = url.match(/!1s(ChIJ[^!&]+)/)
