@@ -17,12 +17,21 @@ export async function POST(req: NextRequest) {
   if (!url) return NextResponse.json({ error: 'URL is required' }, { status: 400 })
 
   const expandedUrl = await expandShortUrl(url)
-  const { placeId, query } = parseMapsUrl(expandedUrl)
+  const { placeId, query, lat, lng } = parseMapsUrl(expandedUrl)
   let resolvedPlaceId = placeId
 
   if (!resolvedPlaceId && query) {
+    const params = new URLSearchParams({
+      input: query,
+      inputtype: 'textquery',
+      fields: 'place_id',
+      key: API_KEY,
+    })
+    if (lat !== undefined && lng !== undefined) {
+      params.set('locationbias', `point:${lat},${lng}`)
+    }
     const res = await fetch(
-      `https://maps.googleapis.com/maps/api/place/findplacefromtext/json?input=${encodeURIComponent(query)}&inputtype=textquery&fields=place_id&key=${API_KEY}`
+      `https://maps.googleapis.com/maps/api/place/findplacefromtext/json?${params.toString()}`
     )
     const data = await res.json()
     resolvedPlaceId = data.candidates?.[0]?.place_id
