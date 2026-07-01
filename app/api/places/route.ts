@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { parseMapsUrl } from '@/lib/places'
+import { parseMapsUrl, expandShortUrl } from '@/lib/places'
 
 const API_KEY = process.env.GOOGLE_MAPS_API_KEY
 
@@ -16,7 +16,8 @@ export async function POST(req: NextRequest) {
   const { url } = await req.json()
   if (!url) return NextResponse.json({ error: 'URL is required' }, { status: 400 })
 
-  const { placeId, query } = parseMapsUrl(url)
+  const expandedUrl = await expandShortUrl(url)
+  const { placeId, query } = parseMapsUrl(expandedUrl)
   let resolvedPlaceId = placeId
 
   if (!resolvedPlaceId && query) {
