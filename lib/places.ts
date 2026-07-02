@@ -29,13 +29,10 @@ export async function expandShortUrl(url: string): Promise<string> {
 export function parseMapsUrl(
   url: string
 ): { placeId?: string; query?: string; lat?: number; lng?: number } {
-  // Extract ChIJ... place ID from data parameter
+  // Extract ChIJ... place ID from data parameter — a real Place ID, usable
+  // directly against Place Details.
   const placeIdMatch = url.match(/!1s(ChIJ[^!&]+)/)
   if (placeIdMatch) return { placeId: decodeURIComponent(placeIdMatch[1]) }
-
-  // CID format: ?cid=12345
-  const cidMatch = url.match(/[?&]cid=(\d+)/)
-  if (cidMatch) return { placeId: cidMatch[1] }
 
   // @lat,lng,zoom viewport segment — used below as a location bias/fallback
   const latLngMatch = url.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/)
@@ -43,20 +40,28 @@ export function parseMapsUrl(
     ? { lat: parseFloat(latLngMatch[1]), lng: parseFloat(latLngMatch[2]) }
     : {}
 
-  // Modern Maps links often encode the place as a hex Feature ID inside the
-  // data parameter instead of a ChIJ id, e.g. !1s0x89c259a9b3117469:0xd134e...
-  // The value after the colon is the place's CID in hex; Places Details
-  // accepts a decimal CID the same way it accepts the ?cid= query param above.
-  const hexFidMatch = url.match(/!1s0x[0-9a-fA-F]+:0x([0-9a-fA-F]+)/)
-  if (hexFidMatch) return { placeId: BigInt('0x' + hexFidMatch[1]).toString(), ...latLng }
-
   // Extract name from URL path /place/Hotel+Name/. When Maps drops the name
   // (e.g. .../place/@40.7,-74,17z), this segment is the viewport instead, so
-  // the [^/@?]+ class intentionally fails to match starting at "@".
+  // the [^/@?]+ class intentionally fails to match starting at "@". Resolved
+  // via Find Place from Text below — checked before the CID/Feature ID
+  // fallbacks because Place Details only accepts real Place IDs, not CIDs,
+  // so a name+location text search is more reliable than those numeric ids.
   const nameMatch = url.match(/\/place\/([^/@?]+)/)
   if (nameMatch) return { query: decodeURIComponent(nameMatch[1].replace(/\+/g, ' ')), ...latLng }
 
-  if (latLngMatch) return { ...latLng, query: url }
+  // CID format: ?cid=12345. Last resort — Place Details doesn't reliably
+  // accept a bare CID as place_id, but there's no name segment to search by
+  // on these bare links, so it's the only signal available.
+  const cidMatch = url.match(/[?&]cid=(\d+)/)
+  if (cidMatch) return { placeId: cidMatch[1], ...latLng }
+
+  // Modern Maps links often encode the place as a hex Feature ID inside the
+  // data parameter instead of a ChIJ id, e.g. !1s0x89c259a9b3117469:0xd134e...
+  // Same caveat as the CID case above — only reached when no name was found.
+  const hexFidMatch = url.match(/!1s0x[0-9a-fA-F]+:0x([0-9a-fA-F]+)/)
+  if (hexFidMatch) return { placeId: BigInt('0x' + hexFidMatch[1]).toString(), ...latLng }
+
+  if (latLngMatch) return { ...latLng }
 
   return { query: url }
 }
