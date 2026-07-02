@@ -3,39 +3,47 @@ import { parseMapsUrl, expandShortUrl } from '@/lib/places'
 
 const API_KEY = process.env.GOOGLE_MAPS_API_KEY
 
-const HOTEL_TYPES = new Set([
-  'lodging', 'hotel', 'motel', 'resort_hotel', 'extended_stay_hotel',
-  'bed_and_breakfast', 'inn', 'hostel', 'campground',
-])
+// Accommodation-related types actually returned by the legacy Place Details
+// endpoint (Table A). Newer granular types like "hotel"/"motel"/"resort_hotel"
+// belong to the Places API (New) taxonomy and are never returned here.
+const HOTEL_TYPES = new Set(['lodging', 'campground', 'rv_park'])
+
+async function resolvePlaceIdFromUrl(url: string): Promise<string | undefined> {
+  const expandedUrl = await expandShortUrl(url)
+  const { placeId, query, lat, lng } = parseMapsUrl(expandedUrl)
+  if (placeId) return placeId
+  if (!query) return undefined
+
+  const params = new URLSearchParams({
+    input: query,
+    inputtype: 'textquery',
+    fields: 'place_id',
+    key: API_KEY!,
+  })
+  if (lat !== undefined && lng !== undefined) {
+    params.set('locationbias', `point:${lat},${lng}`)
+  }
+  const res = await fetch(
+    `https://maps.googleapis.com/maps/api/place/findplacefromtext/json?${params.toString()}`
+  )
+  const data = await res.json()
+  return data.candidates?.[0]?.place_id
+}
 
 export async function POST(req: NextRequest) {
   if (!API_KEY) {
     return NextResponse.json({ error: 'Google Maps API key not configured' }, { status: 500 })
   }
 
-  const { url } = await req.json()
-  if (!url) return NextResponse.json({ error: 'URL is required' }, { status: 400 })
+  const body = await req.json()
+  const directPlaceId: string | undefined = body.placeId
+  const url: string | undefined = body.url
 
-  const expandedUrl = await expandShortUrl(url)
-  const { placeId, query, lat, lng } = parseMapsUrl(expandedUrl)
-  let resolvedPlaceId = placeId
-
-  if (!resolvedPlaceId && query) {
-    const params = new URLSearchParams({
-      input: query,
-      inputtype: 'textquery',
-      fields: 'place_id',
-      key: API_KEY,
-    })
-    if (lat !== undefined && lng !== undefined) {
-      params.set('locationbias', `point:${lat},${lng}`)
-    }
-    const res = await fetch(
-      `https://maps.googleapis.com/maps/api/place/findplacefromtext/json?${params.toString()}`
-    )
-    const data = await res.json()
-    resolvedPlaceId = data.candidates?.[0]?.place_id
+  if (!directPlaceId && !url) {
+    return NextResponse.json({ error: 'URL is required' }, { status: 400 })
   }
+
+  const resolvedPlaceId = directPlaceId ?? (await resolvePlaceIdFromUrl(url!))
 
   if (!resolvedPlaceId) {
     return NextResponse.json({ error: 'Could not identify a place from this URL.' }, { status: 400 })
@@ -93,7 +101,7 @@ export async function POST(req: NextRequest) {
     lat: place.geometry.location.lat,
     lng: place.geometry.location.lng,
     addedAt: new Date().toISOString(),
-    mapsUrl: url,
+    mapsUrl: url ?? place.url,
     priceLevel: place.price_level,
   }
 
